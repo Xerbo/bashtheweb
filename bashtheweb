@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# Can be started with:
+#  chmod +x bashtheweb
+#  ./bashtheweb
+# And will serve the current directory at 0.0.0.0:8080
+# 
+# However you can also use it as a handler with socat/netcat
+#  socat TCP4-LISTEN:8080,fork EXEC:"./bashtheweb -z"
+#  netcat -l 8080 -e "./bashtheweb -z" (NOTE: UNTESTED)
+# 
+# bashtheweb calls itself recursively to make easy to use
+# below is a diagram which shows what happens:
+# bashtheweb -r /var/www
+#  └ socat
+#     └ bashtheweb -z -r /var/www
+
+version="0.1.6"
+help(){
+   echo "bashtheweb/$version
+A highly configurable webserver written in bash
+
+Arguments:
+   -p        Port to bind to, default 8080
+   -f        Adress family to use, default 4
+   -r        Webserver root, default .
+   -v        Log all data (apart from files)
+   -h        This text
+   -z        Run as HTTP handler"
+   exit 1
+}
+
+# Handle arguments
+PORT="8080"
+FAMILY="4" 
+WWWROOT="."
+VERBOSE=false
+HANDLER=false
+while getopts 'p:f:r:hvz' flag; do
+   case "${flag}" in
+      p)    PORT=${OPTARG};;
+      f)    FAMILY=${OPTARG};;
+      r)    WWWROOT=${OPTARG};;
+      v)    VERBOSE=true;;
+      z)    HANDLER=true;;
+      h)    help;;
+      help) help;;
+      *)    help;;
+   esac
+done
+
+# colours
+YELLOW=$(tput setaf 3)
+WHITE=$(tput setaf 7)
+RED=$(tput setaf 1)
+
+if [ "$HANDLER" = false ]; then
+    echo "Starting bashtheweb at http://0.0.0.0:$PORT at $(date +"%a, %d %b %Y %H:%M:%S %Z")"
+    [[ $UID = 0 ]] && echo "${RED}This webserver should not be trsuted when running as root.${WHITE}"
+    
+    # Pass arguments through to handler
+    passthrough="$*"
+    socat TCP"$FAMILY"-LISTEN:"$PORT",fork EXEC:"$0 -z $passthrough"
+
+    echo "Stopping"
+    # Kill phantom processes
+    killall socat
+else
+    # Helper functions
+    urldecode(){ : "${*//+/ }"; echo -e "${_//%/\\x}"; }
+    recv(){
+        [[ $VERBOSE == true ]] && echo "< $*" >&2
+    }
+    send(){
+        [[ $VERBOSE == true ]] && echo "> $*" >&2
+        printf '%s\r\n' "$*"
+    }
+
+    DATE=$(date +"%a, %d %b %Y %H:%M:%S %Z")
+    RESPONSE_HEADERS=(
+        "Date: $DATE"
+        "Expires: $DATE"
+        "Server: bashtheweb/$version"
+    )
+    declare -a REQUEST_HEADERS
+
+    HTTP_CODES=(
+        [200]="OK"
+        [204]="No Content"
+        [301]="Moved Permanently"
+        [400]="Bad Request"
+        [401]="Unauthorized"
+        [403]="Forbidden"
+        [404]="Not Found"
+        [500]="Internal Server Error"
+        [501]="Not Implemented"
+    )
+
+    # Gets the MIME type of a file and adds it to RESPONSE_HEADERS
+    filemime(){
+        mime=$(file --brief -i "$1")
+        RESPONSE_HEADERS+=("Content-Type: $mime")
+    }
+
+    # Gets length of a file and adds it to RESPONSE_HEADERS
+    filesize(){
+        size=$(wc -c "$1")
+        size=${size%" "*}
+        RESPONSE_HEADERS+=("Content-Length: $size")
+    }
+
+    # Creates a directory index
+    dirlist(){
+        send "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\"><html><head><title>Index of $1</title></head><body><h1>Index of $1</h1>"
+        if [ "$1" != "/" ]; then
+            echo "<a href=\"../\">Parent Directory</a><br/>"
+        fi
+
+        for item in "$WWWROOT$1"*; do
+            if [ -d "$item" ]; then
+                url="${item##*/}/"
+            else
+                url="${item##*/}"
+            fi
+            
+            if [ "$url" != "*" ]; then
+                send "<a href=\"$url\">$url</a><br/>"
+            fi
+        done
+        send "${OPTIONS[APPEND]}</body></html>"
+    }
+
+    # Displays a HTML error
+    errorpage(){
+        title="$1 ${HTTP_CODES[$1]}"
+        case "$1" in
+            "400") desc="You have made a bad request to the server.";;
+            "403") desc="You do not have permission to access this resource.";;
+            "404") desc="No such file or directory.";;
+            "500") desc="Something went wrong in the server.";;
+            "501") desc="This feature hasen't been added yet.";;
+        esac
+        send "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\"><html><head><title>$title</title></head><body><h1>$title</h1><p>$desc</p>${OPTIONS[APPEND]}</body></html>"
+    }
+
+    sendheaders(){
+        # HTTP/0.9 exludes headers
+        if [ "$minorversion" -ne 9 ]; then
+            send "HTTP/$httpversion $1"
+            for header in "${RESPONSE_HEADERS[@]}"; do
+                send "$header"
+            done
+        else
+            send "HTTP/$httpversion $1 ${HTTP_CODES[$1]}"
+        fi
+        send ""
+    }
+
+    while read -r line; do
+        line=${line%%$'\r'}
+        
+        recv "$line"
+        REQUEST_HEADERS+=("$line")
+
+        # Exit the loop when we've reached the end of the headers
+        [[ -z "$line" ]] && break
+    done
+
+    read -r method file httpversion <<< "${REQUEST_HEADERS[0]}"
+
+    if [ -n "$method" ] && [ -n "$file" ] && [ -n "$httpversion" ]; then
+        :
+    else
+        # Since the header is f**ked use HTTP/1.0
+        httpversion="1.0"
+        majorversion="1"
+        minorversion="0"
+
+        sendheaders 400
+        errorpage 400
+        printf "[%s] ${RED}[400]: Bad request${WHITE}\n" "$DATE" >&2
+        exit
+    fi
+
+    httpversion=${httpversion##*/}
+    majorversion=${httpversion%.*}
+    minorversion=${httpversion##*.}
+
+    # Escape and decode
+    file="$(urldecode ${file//"./"})"
+    
+    if [ "$majorversion" -eq 2 ]; then # Non-supported HTTP version
+        sendheaders 501
+        errorpage 501
+        printf "[%s] ${YELLOW}[400]: HTTP/2.0 is not yet supported${WHITE}\n" "$DATE" >&2
+        exit
+    fi
+    
+    # POST request sent to server
+    if [ "$method" != "GET" ] && [ "$method" != "HEAD" ]; then
+        sendheaders 501 "$httpversion"
+        errorpage 501
+        printf "[%s] ${YELLOW}[501]: %s - Non GET request sent to server${WHITE}\n" "$DATE" "$file" >&2
+        exit
+    fi
+
+    # Defaults
+    declare -A OPTIONS
+    OPTIONS["ORDER"]="403"
+    OPTIONS["STRING"]="No text specified in config file"
+    OPTIONS["MIME"]="text/plain"
+    OPTIONS["INDEX"]="index.html"
+    OPTIONS["EXTENSTIONAPI"]="cat"
+
+    # Parse bashtheweb.conf
+    IFS="="
+    while read -r key value; do
+        value=${value//\"/}
+        # Check if this line is a comment
+        if [[ $key != \#* ]]; then
+            # Are we at a section marker
+            if [[ $key == \[*\] ]]; then
+                # TODO micro-optimize dis bitch
+                section=$(echo $key | tr -d '[]')
+            else
+                # See if the requested resource matches the filter
+                
+                if [[ $file =~ $section ]] && [ -n "$value" ]; then
+                    OPTIONS["$key"]="$value"
+                fi
+            fi
+        fi
+    done < bashtheweb.conf
+    
+    # Dyanmic strings that can be used
+    OPTIONS[APPEND]="${OPTIONS[APPEND]/\%VERSION/$version}"
+    OPTIONS[APPEND]="${OPTIONS[APPEND]/\%DATE/$DATE}"
+
+    AUTHPASSED=false
+    IFS='\\n'
+    for header in "${REQUEST_HEADERS[@]}"; do
+        key=${header%:*} # Everything before :
+        if [ "$key" == "Authorization" ]; then
+            credentials=$(echo "${header##*" "}" | base64 -d)
+            username=${credentials%:*}
+            password=${credentials##*\:}
+            if [ "${OPTIONS[PWTYPE]}" == "sha256" ]; then
+                password="$(echo -n "$password" | sha256sum)"
+                password="${password%%" "*}"
+            elif [ "${OPTIONS[PWTYPE]}" == "md5" ]; then
+                password="$(echo -n "$password" | md5sum)"
+                password="${password%%" "*}"
+            fi
+
+            if [ "$username" == "${OPTIONS["USERNAME"]}" ] && [ "$password" == "${OPTIONS["PASSWORD"]}" ]; then
+                printf "[%s] [%s/200]: %s - Authorization successful\n" "$DATE" "$method" "$file" >&2
+                AUTHPASSED=true
+            fi
+        fi
+    done
+        
+    # Go through the serve order
+    IFS='/' read -ra ADDR <<< "${OPTIONS[ORDER]}"
+    for type in "${ADDR[@]}"; do
+        if [ "$type" == "index" ]; then
+            IFS=' '
+            for index in ${OPTIONS[INDEX]}; do
+                if [ -f "$WWWROOT$file$index" ]; then
+                    filemime "$WWWROOT$file$index"
+                    filesize "$WWWROOT$file$index"
+                    sendheaders 200 "$httpversion"
+                    [[ "$method" != "HEAD" ]] && ${OPTIONS[EXTENSTIONAPI]} "$WWWROOT$file$index"
+                    printf "[%s] [%s/200]: %s\n" "$DATE" "$method" "$file" >&2
+                    exit
+                fi
+            done
+        elif [ "$type" == "auth" ] && [ $AUTHPASSED = false ]; then
+            RESPONSE_HEADERS+=("WWW-Authenticate: Basic realm=\"$REALM\"")
+            sendheaders 401 "$httpversion"
+            printf "[%s] ${YELLOW}[%s/401]: %s - Unauthorized${WHITE}\n" "$DATE" "$method" "$file" >&2
+            exit
+        elif [ "$type" == "string" ]; then # Static string
+            RESPONSE_HEADERS+=("Content-Type: ${OPTIONS[MIME]}")
+            sendheaders 200 "$httpversion"
+            send "${OPTIONS[STRING]}"
+            printf "[%s] [%s/200]: %s\n" "$DATE" "$method" "$file" >&2
+            exit
+        elif [ -d "$WWWROOT$file" ] && [ "$type" == "dir" ]; then
+            RESPONSE_HEADERS+=("Content-Type: text/html; charset=utf-8")
+            sendheaders 200 "$httpversion"
+            dirlist "$file"
+            printf "[%s] [%s/200]: %s\n" "$DATE" "$method" "$file" >&2
+            exit
+        elif [ -f "$WWWROOT$file" ] && [ "$type" == "file" ]; then # It's a file
+            filemime "$WWWROOT$file"
+            filesize "$WWWROOT$file"
+            sendheaders 200 "$httpversion"
+            [[ "$method" != "HEAD" ]] && ${OPTIONS[EXTENSTIONAPI]} "$WWWROOT$file"
+            printf "[%s] [%s/200]: %s\n" "$DATE" "$method" "$file" >&2
+            exit
+        elif [ "$type" == "404" ]; then # File not found
+            sendheaders 404 "$httpversion"
+            [[ "$method" != "HEAD" ]] && errorpage 404
+            printf "[%s] ${YELLOW}[%s/404]: %s - No such file or directory${WHITE}\n" "$DATE" "$method" "$file" >&2
+            exit
+        elif [ "$type" == "403" ]; then # Forbidden
+            sendheaders 403 "$httpversion"
+            [[ "$method" != "HEAD" ]] && errorpage 403
+            printf "[%s] ${RED}[%s/403]: %s - Forbidden${WHITE}\n" "$DATE" "$method" "$file" >&2
+            exit
+        elif [ "$type" == "redirect" ]; then # Redirect
+            RESPONSE_HEADERS+=("Location: ${OPTIONS[LOCATION]}")
+            sendheaders 301 "$httpversion"
+            printf "[%s] [%s/301]: %s - Redirect to %s${WHITE}\n" "$DATE" "$file" "$LOCATION" >&2
+            exit
+        fi
+    done
+fi
