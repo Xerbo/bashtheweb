@@ -14,6 +14,12 @@ chmod +x bashtheweb
 ```
 And will serve the current directory at 0.0.0.0:8080
 
+If you are intrested in more speed you can use shc to compile bashtheweb to a binary.
+```
+shc -f bashtheweb -o bashtheweb.bin
+```
+and use `./bashtheweb.bin` instead of `./bashtheweb`.
+
 However you can also use it as a handler with socat/netcat
 ```
 socat TCP4-LISTEN:8080,fork EXEC:"./bashtheweb -z"

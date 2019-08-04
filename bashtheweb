@@ -1,13 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Can be started with:
 #  chmod +x bashtheweb
 #  ./bashtheweb
 # And will serve the current directory at 0.0.0.0:8080
-# 
+#
 # However you can also use it as a handler with socat/netcat
 #  socat TCP4-LISTEN:8080,fork EXEC:"./bashtheweb -z"
 #  netcat -l 8080 -e "./bashtheweb -z" (NOTE: UNTESTED)
-# 
+#
 # bashtheweb calls itself recursively to make easy to use
 # below is a diagram which shows what happens:
 # bashtheweb -r /var/www
@@ -31,7 +31,7 @@ Arguments:
 
 # Handle arguments
 PORT="8080"
-FAMILY="4" 
+FAMILY="4"
 WWWROOT="."
 VERBOSE=false
 HANDLER=false
@@ -56,14 +56,12 @@ RED=$(tput setaf 1)
 if [ "$HANDLER" = false ]; then
     echo "Starting bashtheweb at http://0.0.0.0:$PORT at $(date +"%a, %d %b %Y %H:%M:%S %Z")"
     [[ $UID = 0 ]] && echo "${RED}This webserver should not be trsuted when running as root.${WHITE}"
-    
+
     # Pass arguments through to handler
     passthrough="$*"
     socat TCP"$FAMILY"-LISTEN:"$PORT",fork EXEC:"$0 -z $passthrough"
 
     echo "Stopping"
-    # Kill phantom processes
-    killall socat
 else
     # Helper functions
     urldecode(){ : "${*//+/ }"; echo -e "${_//%/\\x}"; }
@@ -125,7 +123,7 @@ else
             else
                 url="${item##*/}"
             fi
-            
+
             if [ "$url" != "*" ]; then
                 send "<a href=\"$url\">$url</a><br/>"
             fi
@@ -161,7 +159,7 @@ else
 
     while read -r line; do
         line=${line%%$'\r'}
-        
+
         recv "$line"
         REQUEST_HEADERS+=("$line")
 
@@ -191,14 +189,14 @@ else
 
     # Escape and decode
     file="$(urldecode ${file//"./"})"
-    
+
     if [ "$majorversion" -eq 2 ]; then # Non-supported HTTP version
         sendheaders 501
         errorpage 501
         printf "[%s] ${YELLOW}[400]: HTTP/2.0 is not yet supported${WHITE}\n" "$DATE" >&2
         exit
     fi
-    
+
     # POST request sent to server
     if [ "$method" != "GET" ] && [ "$method" != "HEAD" ]; then
         sendheaders 501 "$httpversion"
@@ -214,7 +212,7 @@ else
     OPTIONS["MIME"]="text/plain"
     OPTIONS["INDEX"]="index.html"
     OPTIONS["EXTENSTIONAPI"]="cat"
-    
+
     # Parse bashtheweb.conf
     IFS="="
     while read -r key value; do
@@ -233,12 +231,12 @@ else
             fi
         fi
     done < bashtheweb.conf
-    
+
     EXTENSION=false
     if [ -n ${OPTIONS[EXTENSTIONAPI]} ]; then
         EXTENSION=true
     fi
-    
+
     # Dyanmic strings that can be used
     OPTIONS[APPEND]="${OPTIONS[APPEND]/\%VERSION/$version}"
     OPTIONS[APPEND]="${OPTIONS[APPEND]/\%DATE/$DATE}"
@@ -265,7 +263,7 @@ else
             fi
         fi
     done
-        
+
     # Go through the serve order
     IFS='/' read -ra ADDR <<< "${OPTIONS[ORDER]}"
     for type in "${ADDR[@]}"; do
